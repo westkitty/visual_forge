@@ -19,6 +19,8 @@ jobs:
       - name: Validate standalone artifact
         shell: python
         run: |
+          from collections import Counter
+          from html.parser import HTMLParser
           from pathlib import Path
           import re
           import sys
@@ -28,21 +30,46 @@ jobs:
               raise SystemExit("index.html is missing")
 
           s = p.read_text(encoding="utf-8")
-          ids = re.findall(r'\bid="([^"]+)"', s)
-          pages = set(re.findall(r'\bdata-page="([^"]+)"', s))
-          navs = set(re.findall(r'\bdata-nav="([^"]+)"', s))
-          copy_targets = re.findall(r'\bdata-copy-target="([^"]+)"', s)
+
+          class ForgeParser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.ids = []
+                  self.pages = set()
+                  self.navs = set()
+                  self.copy_targets = []
+                  self.external_resources = []
+
+              def handle_starttag(self, tag, attrs):
+                  a = dict(attrs)
+                  if a.get("id"):
+                      self.ids.append(a["id"])
+                  if tag == "section" and "data-page" in a:
+                      self.pages.add(a["data-page"])
+                  if "data-nav" in a:
+                      self.navs.add(a["data-nav"])
+                  if "data-copy-target" in a:
+                      self.copy_targets.append(a["data-copy-target"])
+                  if tag in {"script", "link", "img", "source", "iframe"}:
+                      for key in ("src", "href"):
+                          value = a.get(key, "")
+                          if value.startswith(("http://", "https://", "//")):
+                              self.external_resources.append((tag, key, value))
+
+          parser = ForgeParser()
+          parser.feed(s)
 
           failures = []
-          if len(pages) != 25:
-              failures.append(f"expected 25 routed views, found {len(pages)}")
-          duplicates = sorted({x for x in ids if ids.count(x) > 1})
+          if len(parser.pages) != 25:
+              failures.append(f"expected 25 routed views, found {len(parser.pages)}")
+          duplicates = sorted(x for x, count in Counter(parser.ids).items() if count > 1)
           if duplicates:
               failures.append(f"duplicate ids: {duplicates}")
-          bad_nav = sorted(x for x in navs if x not in pages)
+          bad_nav = sorted(x for x in parser.navs if x not in parser.pages)
           if bad_nav:
               failures.append(f"navigation targets missing views: {bad_nav}")
-          bad_copy = sorted(x for x in copy_targets if x.lstrip('#') not in ids)
+          id_set = set(parser.ids)
+          bad_copy = sorted(x for x in parser.copy_targets if x.lstrip('#') not in id_set)
           if bad_copy:
               failures.append(f"copy targets missing ids: {bad_copy}")
           if '<meta name="viewport"' not in s:
@@ -51,14 +78,8 @@ jobs:
               failures.append("reduced-motion handling missing")
           if "safe-area-inset-bottom" not in s or "safe-area-inset-top" not in s:
               failures.append("safe-area handling missing")
-
-          external_fetch = re.findall(
-              r'<(?:script|link|img|source|iframe)\b[^>]*(?:src|href)=["\'](?:https?:)?//',
-              s,
-              flags=re.I,
-          )
-          if external_fetch:
-              failures.append("external resource dependency detected")
+          if parser.external_resources:
+              failures.append(f"external resource dependency detected: {parser.external_resources}")
 
           if failures:
               print("Visual Forge quality gate failed:")
@@ -66,4 +87,4 @@ jobs:
                   print(f"- {failure}")
               sys.exit(1)
 
-          print(f"PASS: {len(pages)} routed views, {len(ids)} unique ids, zero external resource dependencies")
+          print(f"PASS: {len(parser.pages)} routed views, {len(parser.ids)} unique ids, zero external resource dependencies")
