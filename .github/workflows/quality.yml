@@ -98,8 +98,46 @@ jobs:
               failures.append('hosted service-worker registration missing')
           if "m.href='./manifest.webmanifest'" not in s:
               failures.append('hosted manifest injection missing')
-          if 'id="lab-share"' not in s or 'id="pocket-status-cache"' not in s:
-              failures.append('Pocket App share/status controls missing')
+          if 'id="lab-share"' not in s:
+              failures.append('Prompt Lab share control missing')
+          if 'data-page="pocket" data-title="Fast Route"' not in s:
+              failures.append('Fast Route workflow missing')
+
+          if re.search(r'\bdraw(?:n|ing|s)?\b', s, re.I):
+              failures.append('forbidden draw terminology present')
+
+          class VisibleTextParser(HTMLParser):
+              def __init__(self):
+                  super().__init__(convert_charrefs=True)
+                  self.skip = 0
+                  self.parts = []
+
+              def handle_starttag(self, tag, attrs):
+                  if tag in {'script', 'style'}:
+                      self.skip += 1
+
+              def handle_endtag(self, tag):
+                  if tag in {'script', 'style'} and self.skip:
+                      self.skip -= 1
+
+              def handle_data(self, data):
+                  if not self.skip:
+                      self.parts.append(data)
+
+          visible_parser = VisibleTextParser()
+          visible_parser.feed(s)
+          visible_text = ' '.join(' '.join(visible_parser.parts).split())
+          reader_meta_patterns = [
+              r'\bsite\b', r'\bwebsite\b', r'\bmicrosite\b',
+              r'\bpages version\b', r'\bgithub\b', r'\bhome screen\b', r'\bweb app\b',
+              r'\bservice worker\b', r'\bhosted build\b', r'\bsingle[ -]file\b',
+              r'\biphone[- ]first\b', r'25 focused modes', r'local prompt tools',
+              r'\bsafe-area aware\b', r'\bsystem fonts\b', r'\blocal storage only\b',
+              r'\bno network\b', r'\bthis file\b', r'\bthis document\b', r'\bthis site\b',
+          ]
+          for pattern in reader_meta_patterns:
+              if re.search(pattern, visible_text, re.I):
+                  failures.append(f'reader-facing implementation/meta copy detected: {pattern}')
 
           missing = [str(x) for x in required_hosted if not x.exists()]
           if missing:
@@ -161,4 +199,4 @@ jobs:
                   print(f'- {failure}')
               sys.exit(1)
 
-          print(f'PASS: {len(parser.pages)} routed views; standalone dependency-free; Pocket App manifest, cache, sharing, and icons present')
+          print(f'PASS: {len(parser.pages)} routed views; reader-facing copy is autonomous; standalone and hosted support contracts pass')
