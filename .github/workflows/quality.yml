@@ -1,0 +1,69 @@
+name: Visual Forge quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate standalone artifact
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import sys
+
+          p = Path("index.html")
+          if not p.exists():
+              raise SystemExit("index.html is missing")
+
+          s = p.read_text(encoding="utf-8")
+          ids = re.findall(r'\bid="([^"]+)"', s)
+          pages = set(re.findall(r'\bdata-page="([^"]+)"', s))
+          navs = set(re.findall(r'\bdata-nav="([^"]+)"', s))
+          copy_targets = re.findall(r'\bdata-copy-target="([^"]+)"', s)
+
+          failures = []
+          if len(pages) != 25:
+              failures.append(f"expected 25 routed views, found {len(pages)}")
+          duplicates = sorted({x for x in ids if ids.count(x) > 1})
+          if duplicates:
+              failures.append(f"duplicate ids: {duplicates}")
+          bad_nav = sorted(x for x in navs if x not in pages)
+          if bad_nav:
+              failures.append(f"navigation targets missing views: {bad_nav}")
+          bad_copy = sorted(x for x in copy_targets if x.lstrip('#') not in ids)
+          if bad_copy:
+              failures.append(f"copy targets missing ids: {bad_copy}")
+          if '<meta name="viewport"' not in s:
+              failures.append("viewport metadata missing")
+          if "prefers-reduced-motion" not in s:
+              failures.append("reduced-motion handling missing")
+          if "safe-area-inset-bottom" not in s or "safe-area-inset-top" not in s:
+              failures.append("safe-area handling missing")
+
+          external_fetch = re.findall(
+              r'<(?:script|link|img|source|iframe)\b[^>]*(?:src|href)=["\'](?:https?:)?//',
+              s,
+              flags=re.I,
+          )
+          if external_fetch:
+              failures.append("external resource dependency detected")
+
+          if failures:
+              print("Visual Forge quality gate failed:")
+              for failure in failures:
+                  print(f"- {failure}")
+              sys.exit(1)
+
+          print(f"PASS: {len(pages)} routed views, {len(ids)} unique ids, zero external resource dependencies")
