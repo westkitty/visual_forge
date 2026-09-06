@@ -12,6 +12,12 @@ GitHub Pages target:
 
 The same `index.html` can also be downloaded and opened as a standalone local HTML artifact.
 
+### One-time Pages enablement
+
+The deployment workflow is installed and ready. GitHub requires the repository's Pages site to be enabled by an admin-authorized session before a repository `GITHUB_TOKEN` can deploy to it.
+
+In the repository, choose **Settings → Pages → Build and deployment → GitHub Actions** once. After that, the included Pages workflow deploys from `main` automatically.
+
 ## What is inside
 
 - 25 routed learning and tool modes
