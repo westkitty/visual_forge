@@ -14,22 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-      - name: Validate standalone artifact
+      - name: Validate standalone + Pocket App contracts
         shell: python
         run: |
           from collections import Counter
           from html.parser import HTMLParser
           from pathlib import Path
+          import json
           import re
+          import struct
           import sys
 
-          p = Path("index.html")
-          if not p.exists():
-              raise SystemExit("index.html is missing")
+          root = Path('.')
+          p = root / 'index.html'
+          required_hosted = [
+              root / 'manifest.webmanifest',
+              root / 'sw.js',
+              root / 'apple-touch-icon.png',
+              root / 'icon-192.png',
+              root / 'icon-512.png',
+          ]
+          failures = []
 
-          s = p.read_text(encoding="utf-8")
+          if not p.exists():
+              failures.append('index.html is missing')
+              s = ''
+          else:
+              s = p.read_text(encoding='utf-8')
 
           class ForgeParser(HTMLParser):
               def __init__(self):
@@ -42,49 +55,110 @@ jobs:
 
               def handle_starttag(self, tag, attrs):
                   a = dict(attrs)
-                  if a.get("id"):
-                      self.ids.append(a["id"])
-                  if tag == "section" and "data-page" in a:
-                      self.pages.add(a["data-page"])
-                  if "data-nav" in a:
-                      self.navs.add(a["data-nav"])
-                  if "data-copy-target" in a:
-                      self.copy_targets.append(a["data-copy-target"])
-                  if tag in {"script", "link", "img", "source", "iframe"}:
-                      for key in ("src", "href"):
-                          value = a.get(key, "")
-                          if value.startswith(("http://", "https://", "//")):
+                  if a.get('id'):
+                      self.ids.append(a['id'])
+                  if tag == 'section' and 'data-page' in a:
+                      self.pages.add(a['data-page'])
+                  if 'data-nav' in a:
+                      self.navs.add(a['data-nav'])
+                  if 'data-copy-target' in a:
+                      self.copy_targets.append(a['data-copy-target'])
+                  if tag in {'script', 'link', 'img', 'source', 'iframe'}:
+                      for key in ('src', 'href'):
+                          value = a.get(key, '')
+                          if value.startswith(('http://', 'https://', '//')):
                               self.external_resources.append((tag, key, value))
 
           parser = ForgeParser()
           parser.feed(s)
 
-          failures = []
           if len(parser.pages) != 25:
-              failures.append(f"expected 25 routed views, found {len(parser.pages)}")
+              failures.append(f'expected 25 routed views, found {len(parser.pages)}')
           duplicates = sorted(x for x, count in Counter(parser.ids).items() if count > 1)
           if duplicates:
-              failures.append(f"duplicate ids: {duplicates}")
+              failures.append(f'duplicate ids: {duplicates}')
           bad_nav = sorted(x for x in parser.navs if x not in parser.pages)
           if bad_nav:
-              failures.append(f"navigation targets missing views: {bad_nav}")
+              failures.append(f'navigation targets missing views: {bad_nav}')
           id_set = set(parser.ids)
           bad_copy = sorted(x for x in parser.copy_targets if x.lstrip('#') not in id_set)
           if bad_copy:
-              failures.append(f"copy targets missing ids: {bad_copy}")
+              failures.append(f'copy targets missing ids: {bad_copy}')
           if '<meta name="viewport"' not in s:
-              failures.append("viewport metadata missing")
-          if "prefers-reduced-motion" not in s:
-              failures.append("reduced-motion handling missing")
-          if "safe-area-inset-bottom" not in s or "safe-area-inset-top" not in s:
-              failures.append("safe-area handling missing")
+              failures.append('viewport metadata missing')
+          if 'prefers-reduced-motion' not in s:
+              failures.append('reduced-motion handling missing')
+          if 'safe-area-inset-bottom' not in s or 'safe-area-inset-top' not in s:
+              failures.append('safe-area handling missing')
           if parser.external_resources:
-              failures.append(f"external resource dependency detected: {parser.external_resources}")
+              failures.append(f'external runtime dependency detected in standalone HTML: {parser.external_resources}')
+          if "location.protocol==='file:'" not in s:
+              failures.append('local-file mode guard missing')
+          if "navigator.serviceWorker.register('./sw.js'" not in s:
+              failures.append('hosted service-worker registration missing')
+          if "m.href='./manifest.webmanifest'" not in s:
+              failures.append('hosted manifest injection missing')
+          if 'id="lab-share"' not in s or 'id="pocket-status-cache"' not in s:
+              failures.append('Pocket App share/status controls missing')
+
+          missing = [str(x) for x in required_hosted if not x.exists()]
+          if missing:
+              failures.append(f'hosted Pocket App files missing: {missing}')
+
+          manifest = {}
+          manifest_path = root / 'manifest.webmanifest'
+          if manifest_path.exists():
+              try:
+                  manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+              except Exception as exc:
+                  failures.append(f'manifest invalid JSON: {exc}')
+          if manifest:
+              if manifest.get('name') != 'Visual Forge':
+                  failures.append('manifest name drifted')
+              if manifest.get('start_url') != './#home' or manifest.get('scope') != './':
+                  failures.append('manifest start_url/scope must stay repository-relative')
+              if manifest.get('display') != 'standalone':
+                  failures.append('manifest display must remain standalone')
+              icons = {str(item.get('src', '')).lstrip('./') for item in manifest.get('icons', []) if isinstance(item, dict)}
+              if not {'icon-192.png', 'icon-512.png'}.issubset(icons):
+                  failures.append('manifest install icons missing')
+
+          sw_path = root / 'sw.js'
+          if sw_path.exists():
+              sw = sw_path.read_text(encoding='utf-8')
+              for expected in ('./index.html', './manifest.webmanifest', './apple-touch-icon.png', './icon-192.png', './icon-512.png'):
+                  if expected not in sw:
+                      failures.append(f'service worker cache list missing {expected}')
+              if re.search(r'https?://', sw):
+                  failures.append('service worker must not fetch external origins')
+              if not re.search(r"(?:req|request)\.method\s*!==?\s*['\"]GET['\"]", sw):
+                  failures.append('service worker GET-only guard missing')
+
+          def png_size(path):
+              data = path.read_bytes()
+              if data[:8] != b'\x89PNG\r\n\x1a\n' or len(data) < 24:
+                  raise ValueError('not a PNG')
+              return struct.unpack('>II', data[16:24])
+
+          expected_sizes = {
+              'apple-touch-icon.png': (180, 180),
+              'icon-192.png': (192, 192),
+              'icon-512.png': (512, 512),
+          }
+          for name, expected in expected_sizes.items():
+              path = root / name
+              if path.exists():
+                  try:
+                      actual = png_size(path)
+                      if actual != expected:
+                          failures.append(f'{name} expected {expected}, found {actual}')
+                  except Exception as exc:
+                      failures.append(f'{name} invalid: {exc}')
 
           if failures:
-              print("Visual Forge quality gate failed:")
+              print('Visual Forge quality gate failed:')
               for failure in failures:
-                  print(f"- {failure}")
+                  print(f'- {failure}')
               sys.exit(1)
 
-          print(f"PASS: {len(parser.pages)} routed views, {len(parser.ids)} unique ids, zero external resource dependencies")
+          print(f'PASS: {len(parser.pages)} routed views; standalone dependency-free; Pocket App manifest, cache, sharing, and icons present')
